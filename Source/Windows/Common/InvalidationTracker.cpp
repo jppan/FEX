@@ -599,6 +599,65 @@ FEXCore::IntervalList<uint64_t>::Interval InvalidationTracker::PromoteDEPRegionL
   return ProtInterval;
 }
 
+/* iOS-Madeira ml2021: make the live Wine page table authoritative on a decode miss.
+ *
+ * BTCpuNotifyMemoryProtect is the normal way PAGE_EXECUTE_* reaches XIntervals,
+ * but it is intentionally a notification rather than the operation itself.  If
+ * its callback gate is left set, a re-entrancy guard drops it, or a pseudo-process
+ * transition misses it, Wine can successfully make a page executable while this
+ * tracker still says NOEXEC.  Elden Ring exposed that exact split: VirtualQuery
+ * reported PAGE_EXECUTE_WRITECOPY for 0x144b16000 while XIntervals missed
+ * 0x144b16025, so the decoder emitted its deliberate NULL-load trap and killed
+ * the process.
+ *
+ * A miss is cold and no block can have been compiled for it yet.  Query the live
+ * mapping once under the same exclusive lock used by DEP promotion and restore
+ * precisely the committed PAGE_EXECUTE_* region.  Genuine data and wild branches
+ * remain misses; PAGE_GUARD and PAGE_NOACCESS remain faults.  Mark writable
+ * executable ranges as RWX as well so the normal post-compile SMC trap is armed.
+ */
+FEXCore::IntervalList<uint64_t>::Interval InvalidationTracker::RepairExecutableRegionLocked(uint64_t Address) {
+  if (GuestBase && (Address < GuestBase || (Address - GuestBase) >= (1ULL << 32))) {
+    return {};
+  }
+
+  MEMORY_BASIC_INFORMATION Info;
+  if (!VirtualQuery(reinterpret_cast<LPCVOID>(Address), &Info, sizeof(Info)) || Info.State != MEM_COMMIT ||
+      (Info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !ProtHasExec(Info.Protect)) {
+    return {};
+  }
+
+  const uint64_t Base = reinterpret_cast<uint64_t>(Info.BaseAddress);
+  if (Info.RegionSize > UINT64_MAX - Base) {
+    return {};
+  }
+  const uint64_t End = Base + Info.RegionSize;
+  const uint64_t AlignedBase = Base & FEXCore::Utils::FEX_PAGE_MASK;
+  if (End > UINT64_MAX - (FEXCore::Utils::FEX_PAGE_SIZE - 1)) {
+    return {};
+  }
+  const uint64_t AlignedEnd =
+    (End + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
+  if (Address < AlignedBase || Address >= AlignedEnd || AlignedEnd <= AlignedBase) {
+    return {};
+  }
+
+  FEXCore::IntervalList<uint64_t>::Interval Interval {AlignedBase, AlignedEnd};
+  XIntervals.Insert(Interval);
+  if (ProtIsWritable(Info.Protect)) {
+    RWXIntervals.Insert(Interval);
+  }
+
+  static std::atomic<uint32_t> RepairCount {0};
+  const auto N = RepairCount.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (N <= 32) {
+    LogMan::Msg::EFmt("[xrepair] ml2021 #{} tracker={} miss={:#x} live={:#x}-{:#x} prot={:#x} writable={}", N,
+                      static_cast<void*>(this), Address, AlignedBase, AlignedEnd, Info.Protect,
+                      ProtIsWritable(Info.Protect));
+  }
+  return Interval;
+}
+
 InvalidationTracker::DEPStats InvalidationTracker::GetDEPStats() const {
   return {
     DEPDisabled,
@@ -1127,11 +1186,11 @@ bool InvalidationTracker::BeginUntrackedWriteLocked(uint64_t Address, uint64_t S
  * path names itself. */
 FEXCore::HLE::ExecutableRangeInfo InvalidationTracker::QueryExecutableRange(uint64_t Address) {
   {
-    // The hot path: one interval query under a shared lock, exactly as before. A zero Size means
-    // "not executable", which only has a second chance to be answered when DEP is off.
+    // The hot path remains one interval query under a shared lock. A miss gets
+    // one cold-path look at Wine's live protection even when DEP is enabled.
     std::shared_lock Lock(IntervalsLock);
     const auto Info = QueryExecutableRangeLocked(Address);
-    if (Info.Size || !DEPDisabled) {
+    if (Info.Size) {
       return Info;
     }
   }
@@ -1166,8 +1225,11 @@ FEXCore::HLE::ExecutableRangeInfo InvalidationTracker::QueryExecutableRange(uint
   }
   TrackerLockScope Reentry;
   std::unique_lock Lock(IntervalsLock);
-  if (!XIntervals.Query(Address).Enclosed && !PromoteDEPRegionLocked(Address).End) {
-    return {};
+  if (!XIntervals.Query(Address).Enclosed) {
+    if (!RepairExecutableRegionLocked(Address).End &&
+        (!DEPDisabled || !PromoteDEPRegionLocked(Address).End)) {
+      return {};
+    }
   }
   return QueryExecutableRangeLocked(Address);
 }

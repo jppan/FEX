@@ -54,7 +54,20 @@ target_link_libraries(arm64ecfex PRIVATE
 # they include the right startup files, CRT, and produce a clean arm64ec PE.
 # The resulting DLL is slightly larger but links cleanly.
 if (FEX_IOS_HOST_BUILD)
-  target_link_options(arm64ecfex PRIVATE -static)
+  # Keep MinGW's startup/CRT defaults, but suppress the driver's automatic
+  # static libc++.a. The iOS-host build deliberately links the ARM64EC
+  # libc++.dll import archive at the tail of JemallocLibs; allowing both gives
+  # duplicate EC definitions for locale, stdexcept, mutex, and friends.
+  # llvm-mingw's ARM64EC UCRT archive carries these implementations under
+  # EC-prefixed symbols.  Its macOS-hosted GNU driver does not infer the
+  # archive members from the unprefixed references, so explicitly seed the
+  # undefined EC names before their import/archive groups are scanned.
+  target_link_options(arm64ecfex PRIVATE
+    -static
+    -nostdlib++
+    "-Wl,--undefined=#snprintf"
+    "-Wl,--undefined=#access"
+    "-Wl,--undefined=__clear_cache")
 else()
   target_link_options(arm64ecfex PRIVATE -static -nostdlib -nostartfiles -nodefaultlibs -lc++ -lc++abi -lunwind)
   target_link_libraries(arm64ecfex PRIVATE ${LIBGCC_PATH})

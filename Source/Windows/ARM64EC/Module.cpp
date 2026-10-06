@@ -70,6 +70,23 @@ extern "C" char ios_va_log[];
 extern "C" int ios_va_log_len;
 
 #ifdef FEX_IOS_HOST
+/* llvm-mingw 22's ARM64EC compiler-rt implements __clear_cache by calling
+ * FlushInstructionCache through an ARM64EC exit thunk.  Its import symbol is
+ * not resolved by either the generated CommonWindowsRuntime implementation or
+ * llvm-mingw's kernel32/mincore import archives, leaving the final DLL link
+ * with an undefined EC symbol.  This target already imports ntdll and all of
+ * its cache-maintenance paths use NtFlushInstructionCache, so provide the
+ * compiler helper locally and avoid the broken compiler-rt thunk entirely. */
+extern "C" __attribute__((noinline, used)) void __clear_cache(void* Begin, void* End) {
+  const auto BeginAddress = reinterpret_cast<uintptr_t>(Begin);
+  const auto EndAddress = reinterpret_cast<uintptr_t>(End);
+  if (EndAddress <= BeginAddress) {
+    return;
+  }
+
+  NtFlushInstructionCache(NtCurrentProcess(), Begin, EndAddress - BeginAddress);
+}
+
 /* iOS JIT-pool alias resolution. Implemented in IosJitAlias.cpp (separate
  * TU because ARM64EC class-method access to the static table directly from
  * this TU triggered "misaligned ldr/str offset" link errors). The

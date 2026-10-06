@@ -65,7 +65,19 @@ public:
 
   template<typename T>
   T* GetPass(fextl::string Name) {
+#ifdef FEX_IOS_HOST
+    /* iOS-Madeira ml2028: every named pass is inserted together with its
+     * concrete type (currently the only typed lookup is "RA", installed by
+     * InsertRegisterAllocationPass).  Do not send this lookup through
+     * libc++'s __dynamic_cast on ARM64EC.  The runtime implements its virtual
+     * RTTI walk with an ARM64EC exit thunk, and the JIT-pool copy of libc++'s
+     * __os_arm64x_dispatch_call_no_redirect slot can still contain the image
+     * initializer (NULL) while the first FEX thread is being constructed.
+     * That made CreateArm64JITCore branch directly to address zero. */
+    return static_cast<T*>(NameToPassMaping[Name]);
+#else
     return dynamic_cast<T*>(NameToPassMaping[Name]);
+#endif
   }
 
   Pass* GetPass(fextl::string Name) {

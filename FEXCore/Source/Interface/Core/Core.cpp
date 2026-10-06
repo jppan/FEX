@@ -77,6 +77,7 @@ extern uintptr_t ios_fex_jit_pool_end;
 }
 #endif
 
+#ifdef ENABLE_FEX_ALLOCATOR
 /* iOS-Madeira ml622: mirror of rpmalloc's POD snapshot (rpmalloc.c). Declared here
  * rather than in a shared header because rpmalloc is C and vendored; keep the two
  * definitions in sync — the drain below is the only consumer. */
@@ -90,6 +91,7 @@ struct rpm_cas_snapshot {
 };
 int rpm_cas_snapshot_take(struct rpm_cas_snapshot* out);
 }
+#endif
 #include <condition_variable>
 #include <fcntl.h>
 #include <functional>
@@ -554,7 +556,7 @@ void ContextImpl::InitializeCompiler(FEXCore::Core::InternalThreadState* Thread)
 
 FEXCore::Core::InternalThreadState*
 ContextImpl::CreateThread(uint64_t InitialRIP, uint64_t StackPointer, const FEXCore::Core::CPUState* NewThreadState) {
-  LogMan::Msg::EFmt("[TI-IC] createthread-enter");
+  LogMan::Msg::EFmt("[TI-IC] createthread-enter ml2024 no-crt-probes");
 
   /* ml790: ALLOCATE, CHECK, THEN CONSTRUCT.
    *
@@ -570,23 +572,21 @@ ContextImpl::CreateThread(uint64_t InitialRIP, uint64_t StackPointer, const FEXC
    * check makes the failure returnable. */
   void* ThreadMem = FEXCore::Allocator::aligned_alloc(alignof(FEXCore::Core::InternalThreadState),
                                                       sizeof(FEXCore::Core::InternalThreadState));
-#ifdef FEX_IOS_HOST
-  /* MADEIRA_FEX_FAIL_CALLRET=threadstate:N fails the Nth thread-state
-   * allocation, so this containment path can be proven rather than assumed --
-   * it only occurs naturally once the band is exhausted. */
-  {
-    static std::atomic<unsigned> TSCount {0};
-    const unsigned ThisTS = ++TSCount;
-    const char* Env = getenv("MADEIRA_FEX_FAIL_CALLRET");
-    if (Env && !strncmp(Env, "threadstate:", 12) && ThisTS == (unsigned)atoi(Env + 12)) {
-      LogMan::Msg::EFmt("[TI-IC] INJECTED thread-state allocation failure on call #{}", ThisTS);
-      if (ThreadMem) {
-        FEXCore::Allocator::aligned_free(ThreadMem);
-        ThreadMem = nullptr;
-      }
-    }
-  }
-#endif
+  /* iOS-Madeira ml2024: do not call getenv (or any imported CRT routine)
+   * between entering ThreadInit and constructing InternalThreadState.
+   *
+   * ARM64EC native code executes from Madeira's JIT-pool image copy.  UCRT's
+   * DllMain initialized lock_table[17] in the PE-side .data, while a native
+   * call to imported getenv reaches the pool copy of ucrtbase!_lock and its
+   * still-zero .data.  _lock(17) then recursively calls itself until the
+   * 8 MiB Wine stack is exhausted.  The removed MADEIRA_FEX_FAIL_CALLRET
+   * failure-injection probe did exactly that immediately after this allocation;
+   * the device signature was ucrtbase+0x3a138 (stp x19,x20,[sp,#0x10]) after
+   * "[TI-IC] createthread-enter", with no "threadstate-alloc" marker.
+   *
+   * Failure injection must be compile-time or supplied as plain data by ntdll,
+   * like the FEX arena hand-off.  A production thread-init path must remain
+   * free of CRT/environment probes. */
   if (!ThreadMem) {
     LogMan::Msg::EFmt("[TI-IC] THREADSTATE ALLOC FAILED: {} bytes, {} alignment -- the emulator "
                       "address band is exhausted; refusing to start this thread",
@@ -2480,6 +2480,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
         }
       }
 
+#ifdef ENABLE_FEX_ALLOCATOR
       /* iOS-Madeira ml622: drain the rpmalloc remote-free CAS snapshot HERE —
        * outside rpmalloc, where formatting is safe. The allocator side only ever
        * copies scalars into a POD and sets a flag; it must never format, because
@@ -2504,6 +2505,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
                             Snap.fail_changed, Snap.fail_unchanged, Snap.fail_invalid);
         }
       }
+#endif
     }
   }
 

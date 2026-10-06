@@ -301,8 +301,35 @@ endif()
 # Only needed for targets that run emulation. For others, use JemallocDummy.
 add_library(JemallocLibs STATIC Utils/AllocatorHooks.cpp)
 if (ENABLE_FEX_ALLOCATOR)
+  target_compile_definitions(${PROJECT_NAME}_object PRIVATE ENABLE_FEX_ALLOCATOR=1)
   target_compile_definitions(JemallocLibs PRIVATE ENABLE_FEX_ALLOCATOR=1)
   target_link_libraries(JemallocLibs PUBLIC rpmalloc)
+endif()
+if (FEX_IOS_HOST_BUILD AND MINGW)
+  # CMake recognizes these as implicit compiler libraries during its probe,
+  # but llvm-mingw's ARM64EC shared-library driver does not add them back.
+  # Propagate them from the last emulation-runtime dependency rather than from
+  # arm64ecfex itself: static archives are resolved left-to-right, and adding
+  # them directly to arm64ecfex places them before this target's transitive
+  # archives, leaving their EC-mangled std:: and exception references open.
+  # Use the exact ARM64EC import archives. llvm-mingw 22.1.4's static libc++.a
+  # has incompatible EC archive/symbol handling in the macOS GNU-style driver:
+  # even an absolute, last-position archive leaves every std:: symbol open.
+  # The shipped libc++.dll import archive exports both ARM64 and ARM64EC symbol
+  # forms and links cleanly. The two runtime DLLs are staged beside xtajit64.dll
+  # by build/fex-arm64ec/build.sh.
+  get_filename_component(FEX_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  get_filename_component(FEX_MINGW_RUNTIME_DIR
+    "${FEX_MINGW_BIN_DIR}/../${MINGW_TRIPLE}/lib" ABSOLUTE)
+  set(FEX_MINGW_RUNTIME_LIBS
+    "${FEX_MINGW_RUNTIME_DIR}/libc++.dll.a"
+    "${FEX_MINGW_RUNTIME_DIR}/libunwind.dll.a")
+  foreach(FEX_MINGW_RUNTIME_LIB IN LISTS FEX_MINGW_RUNTIME_LIBS)
+    if (NOT EXISTS "${FEX_MINGW_RUNTIME_LIB}")
+      message(FATAL_ERROR "Missing ARM64EC runtime archive: ${FEX_MINGW_RUNTIME_LIB}")
+    endif()
+  endforeach()
+  target_link_libraries(JemallocLibs INTERFACE ${FEX_MINGW_RUNTIME_LIBS})
 endif()
 if (ENABLE_JEMALLOC_GLIBC_ALLOC)
   set_source_files_properties(Interface/HLE/Thunks/Thunks.cpp PROPERTIES COMPILE_DEFINITIONS ENABLE_JEMALLOC_GLIBC=1)

@@ -93,6 +93,11 @@ private:
   // readable, non-executable page (i.e. a genuine wild branch, which must still fault).
   // NOTE: Must be called with IntervalsLock held exclusively.
   FEXCore::IntervalList<uint64_t>::Interval PromoteDEPRegionLocked(uint64_t Address);
+  // Repairs a dropped allocation/protection notification from the live Wine
+  // page state. Unlike DEP promotion, this requires PAGE_EXECUTE_* and is
+  // therefore valid even while DEP is enabled.
+  // NOTE: Must be called with IntervalsLock held exclusively.
+  FEXCore::IntervalList<uint64_t>::Interval RepairExecutableRegionLocked(uint64_t Address);
   // The interval-list half of QueryExecutableRange. NOTE: IntervalsLock must be held.
   FEXCore::HLE::ExecutableRangeInfo QueryExecutableRangeLocked(uint64_t Address);
 

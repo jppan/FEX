@@ -724,6 +724,9 @@ Arm64JITCore::Arm64JITCore(FEXCore::Context::ContextImpl* ctx, FEXCore::Core::In
 
   SetWriteOffset(FEXCore::DualMap::WriteOffset);
 
+#ifdef FEX_IOS_HOST
+  LogMan::Msg::EFmt("[TI-IC] ra-cast ml2028 static-no-libcxx-rtti");
+#endif
   RAPass = Thread->PassManager->GetPass<IR::RegisterAllocationPass>("RA");
 
   RAPass->AddRegisters(IR::RegClass::GPR, GeneralRegisters.size());
