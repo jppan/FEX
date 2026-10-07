@@ -22,12 +22,12 @@ namespace CPU {
 
   static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 16;
 #ifdef FEX_IOS_HOST
-  // iOS-Madeira ml437 (#74): the shared 896MB JIT pool's tail budget is ~188MB
-  // for ALL threads' code buffers; hot threads doubling 16->32->64->128MB
-  // exhausted it in ml436 (head 708MB of DLL copies + tail collided; 10 honest
-  // refusals, 123 degraded threads). Cap growth at 32MB — hot threads clear
-  // and recompile more often, but every thread gets a REAL buffer.
-  static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 32;
+  // iOS-Madeira ml2053: the current 512MB shared pool leaves about 312MB for
+  // its swept tail. A 32MB cap caused hot games to rotate fourteen generations
+  // and recompile tens of thousands of blocks per sample. Permit 64MB; the
+  // native pool grant still narrows this to 32MB under process pressure and
+  // refuses allocations which do not fit its measured live-tail budget.
+  static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 64;
 #else
   // We don't want to move above 128MB atm because that means we will have to encode longer jumps
   static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 128;

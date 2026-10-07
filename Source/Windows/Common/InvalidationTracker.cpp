@@ -444,6 +444,30 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
     const bool EffectiveRWX = HasExec && ProtIsWritable(Prot);
 
     if (HasExec) {
+      /* iOS-Madeira ml2052: make the interval state, rather than the caller's
+       * idea of the old page protection, authoritative for executable no-ops.
+       * PE loaders and engines frequently repeat PAGE_EXECUTE_* on an already
+       * registered 16 KB host page.  Returning true for those calls invalidated
+       * perfectly live translations; an open-world load compiled ~560k blocks
+       * and rotated the code cache 17 times even though execute/RWX state had
+       * not changed.
+       *
+       * This test is exact: X must already enclose the whole interval and RWX
+       * must already match the requested writability.  Partial coverage still
+       * takes the normal mutation+invalidation path. */
+      const bool SameX = XIntervals.Contains(ProtInterval);
+      const bool SameRWX = EffectiveRWX ? RWXIntervals.Contains(ProtInterval)
+                                        : !RWXIntervals.Intersect(ProtInterval);
+      if (SameX && SameRWX) {
+        static std::atomic<uint64_t> ExecNoops {0};
+        const auto N = ExecNoops.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (N <= 8 || (N & (N - 1)) == 0) {
+          LogMan::Msg::DFmt("[protect-noop] ml2052 #{} {:#x}-{:#x} prot={:#x}; translations kept",
+                            N, ProtInterval.Offset, ProtInterval.End, Prot);
+        }
+        return false;
+      }
+
       XIntervals.Insert(ProtInterval);
       if (EffectiveRWX) {
         /* Capped. This fires once per genuinely RWX range, which is rare and interesting - but
@@ -458,6 +482,11 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
           LogMan::Msg::DFmt("Add SMC interval: 64 reported — further ones suppressed for this session");
         }
         RWXIntervals.Insert(ProtInterval);
+      } else {
+        /* An RWX -> RX transition is a real state change.  The old code
+         * invalidated translations but accidentally left the stale RWX marker,
+         * so later writes kept taking unnecessary SMC traps. */
+        RWXIntervals.Remove(ProtInterval);
       }
       return true;
     } else if (XIntervals.Intersect(ProtInterval)) {
